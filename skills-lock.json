@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "skills": {
+    "confluence-api": {
+      "source": "clawhub.ai",
+      "sourceUrl": "https://clawhub.ai/byungkyu/skills/confluence-api",
+      "sourceType": "well-known",
+      "computedHash": "a16c76c3c8f98a6fdf4038008c7f063c980fc125498a59518ed81103b332c078",
+      "wellKnownDigest": "sha256:f3be61a951fb6f2e48cf90747295b9e712e1ddeb6a9c1a25b650576c7b096216"
+    }
+  }
+}

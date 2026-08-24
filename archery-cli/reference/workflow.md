@@ -1,0 +1,208 @@
+# SQL Workflows
+
+Manage SQL audit workflows: submit SQL for review, audit (approve/reject), execute approved workflows, cancel, and run sqlcheck.
+
+## Table of Contents
+
+- [Read commands](#read-commands)
+- [Write commands](#write-commands)
+- [Workflow data payload](#workflow-data-payload)
+- [Workflows](#workflows)
+- [Notes](#notes)
+
+## Read commands
+
+```bash
+# List workflows with optional filters
+archery-cli workflow list --compact
+archery-cli workflow list --status workflow_finish --compact
+archery-cli workflow list --engineer admin --compact
+archery-cli workflow list --instance 1 --db mydb --limit 50 --compact
+archery-cli workflow list --fields id,name,status,engineer --compact
+
+# Get workflow details (SQL content, audit log, execution status)
+archery-cli workflow detail 42
+archery-cli workflow detail 42 --fields id,name,status,sql
+
+# Run SQL syntax and risk check (no side effects, no workflow created)
+archery-cli workflow sqlcheck --instance 1 --db mydb --sql "ALTER TABLE users ADD INDEX idx_email (email)"
+```
+
+### `workflow list` flags
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--status` | string | (all) | Filter by status (e.g. `workflow_finish`, `audit_abort`, `workflow_manconfirming`) |
+| `--engineer` | string | (all) | Filter by creator username |
+| `--instance` | int | (all) | Filter by instance ID |
+| `--db` | string | (all) | Filter by database name |
+| `--limit` | int | 20 | Max results per page (1-500) |
+| `--offset` | int | 0 | Pagination offset |
+| `--fields` | string | (all) | Comma-separated output fields |
+
+### `workflow detail` flags
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--fields` | string | Comma-separated output fields |
+
+`workflow detail` returns the execution/review result rows in `result[]` (each
+`{stage, stageStatus, errLevel, error, affectedRows, executeTime}`) plus the
+string `statusCode` (e.g. `workflow_exception`). When an execution failed, the
+reason is in `result[].error` — read it before escalating.
+
+### `workflow sqlcheck` flags
+
+| Flag | Type | Required | Description |
+|------|------|----------|-------------|
+| `--instance` | int | one of | Target instance ID (resolved to a name in session mode) |
+| `--instance-name` | string | one of | Target instance name (session mode; wins over `--instance`) |
+| `--db` | string | yes | Target database name |
+| `--sql` | string | yes | SQL to check |
+
+## Write commands
+
+All write commands require `--dry-run` first, then `--confirm <token>`.
+
+### Submit a workflow
+
+```bash
+archery-cli workflow submit --name "Add email index" --instance 1 --db mydb \
+  --sql "ALTER TABLE users ADD INDEX idx_email (email)" --dry-run
+
+archery-cli workflow submit --name "Add email index" --instance 1 --db mydb \
+  --sql "ALTER TABLE users ADD INDEX idx_email (email)" --confirm ct_...
+```
+
+| Flag | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `--name` | string | yes | -- | Workflow title |
+| `--instance` | int | one of | -- | Target instance ID (resolved to a name in session mode) |
+| `--instance-name` | string | one of | -- | Target instance name (session mode; wins over `--instance`) |
+| `--db` | string | yes | -- | Target database name |
+| `--sql` | string | yes | -- | SQL content |
+| `--group` | int | one of | (auto) | Resource group ID (resolved to a name in session mode) |
+| `--group-name` | string | one of | -- | Resource group name (session mode; wins over `--group`) |
+| `--backup` | bool | no | true | Require backup before execution (needs Archery backups configured; see note below) |
+| `--demand-url` | string | no | -- | Related demand/requirement URL |
+
+> **Backup prerequisite:** with `--backup=true` (the default), DDL execution
+> needs Archery's backup feature configured (`enable_backup_switch` + a reachable
+> backup DB). Without it, execution fails with `Invalid remote backup
+> information` (visible in `workflow detail` → `result[].error`). Submit with
+> `--backup=false` to skip backups, or have a DBA configure the backup database.
+
+### Audit (approve or reject) a workflow
+
+```bash
+archery-cli workflow audit 42 --action pass --remark "LGTM" --dry-run
+archery-cli workflow audit 42 --action pass --remark "LGTM" --confirm ct_...
+```
+
+| Flag | Type | Required | Description |
+|------|------|----------|-------------|
+| `--action` | string | yes | `pass` or `cancel` |
+| `--remark` | string | no | Audit remark/comment |
+| `--ids` | string | no | Workflow IDs for a batch audit (comma-separated or repeatable) |
+| `--continue-on-error` | bool | no | Keep auditing after a failure (batch; default `true`) |
+
+#### Batch audit
+
+```bash
+archery-cli workflow audit --ids 42,43,44 --action pass --dry-run
+archery-cli workflow audit --ids 42,43,44 --action pass --confirm ct_...
+```
+
+Pass either a positional `WORKFLOW_ID` or `--ids`, not both. Audit is reversible, so the whole batch shares one confirm token (no per-item confirm) and defaults to `--continue-on-error true`. Output is `items[]` + `summary{total, succeeded, failed, skipped}`. Client-side loop; not atomic.
+
+### Execute an approved workflow
+
+```bash
+archery-cli workflow execute 42 --mode auto --dangerous --dry-run
+archery-cli workflow execute 42 --mode auto --dangerous --confirm ct_...
+```
+
+| Flag | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `--mode` | string | no | auto | `auto` or `manual` execution mode |
+| `--ids` | string | no | -- | Workflow IDs for a batch execute (comma-separated or repeatable) |
+| `--continue-on-error` | bool | no | `false` | Keep executing after a failure (batch) |
+
+#### Batch execute
+
+```bash
+archery-cli workflow execute --ids 42,43 --dangerous --dry-run
+archery-cli workflow execute --ids 42,43 --dangerous --confirm ct_...
+```
+
+Execute is irreversible, so the batch is **more conservative** than the generic contract: the `--dangerous` gate is required, and `--continue-on-error` defaults to **`false`** (stop at the first failure; unattempted workflows are reported as `skipped`). Already-executed workflows stay executed (no rollback). Client-side loop; not atomic.
+
+### Cancel a running workflow
+
+```bash
+archery-cli workflow cancel 42 --remark "No longer needed" --dry-run
+archery-cli workflow cancel 42 --remark "No longer needed" --confirm ct_...
+```
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--remark` | string | Cancellation remark |
+
+## Workflow data payload
+
+```json
+{
+  "id": "42",
+  "name": "Add email index",
+  "status": "workflow_finish",
+  "engineer": "admin",
+  "instance": "1",
+  "db_name": "mydb",
+  "sql_content": "ALTER TABLE users ADD INDEX idx_email (email)",
+  "create_time": "2024-06-15T10:30:00Z",
+  "url": "https://archery.example.com/sqlworkflow/42/"
+}
+```
+
+### List response shape
+
+```json
+{
+  "items": [...],
+  "count": 20,
+  "limit": 20,
+  "total": 150,
+  "has_more": true
+}
+```
+
+## Workflows
+
+### Submit SQL for audit then execute after approval
+
+```bash
+# 1. Optionally run sqlcheck first
+archery-cli workflow sqlcheck --instance 1 --db mydb --sql "ALTER TABLE orders ADD COLUMN note VARCHAR(255)"
+
+# 2. Submit
+archery-cli workflow submit --name "Add note column" --instance 1 --db mydb \
+  --sql "ALTER TABLE orders ADD COLUMN note VARCHAR(255)" --dry-run
+archery-cli workflow submit --name "Add note column" --instance 1 --db mydb \
+  --sql "ALTER TABLE orders ADD COLUMN note VARCHAR(255)" --confirm ct_...
+
+# 3. Check status
+archery-cli workflow detail 42
+
+# 4. Execute after approval
+archery-cli workflow execute 42 --mode auto --dangerous --dry-run
+archery-cli workflow execute 42 --mode auto --dangerous --confirm ct_...
+```
+
+## Notes
+
+- `workflow list` supports `--fields` for output trimming in JSON mode
+- `workflow submit` returns `workflowId` and `url` in the response
+- `workflow execute` risk level is **high** -- requires `--dangerous` in both dry-run and confirm steps
+- `workflow audit` action must be exactly `pass` or `cancel`
+- Workflow status values: `workflow_manconfirming`, `workflow_finish`, `audit_abort`, `workflow_executing`, etc.
+- All write operations are audit-logged to `~/.archery-cli/audit/`
