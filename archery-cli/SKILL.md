@@ -41,6 +41,7 @@ Do **not** read every file under `reference/` unless the task spans multiple dom
 # export ARCHERY_CLI_URL=https://archery.example.com
 # export ARCHERY_CLI_USERNAME=admin
 # export ARCHERY_CLI_PASSWORD=secret
+# export ARCHERY_PAT=arp_pat_...   # PAT mode: use scripts/archery_pat.py (no username/password needed)
 
 archery-cli context --compact      # who/where; exit 4 if not authed
 archery-cli doctor --compact       # auth + network + version check
@@ -48,6 +49,39 @@ archery-cli doctor --compact       # auth + network + version check
 
 First-time setup: ask user for Archery URL + credentials, then run `archery-cli auth login --url <URL> --username <USER> --password <PASS> --region default --dry-run`, inspect the preview, and retry with `--confirm <confirm_token>`.
 `auth login` persists tokens only in the OS keyring. If `doctor` reports `credential-store` as `warn`, use `ARCHERY_CLI_URL`, `ARCHERY_CLI_USERNAME`, and `ARCHERY_CLI_PASSWORD` for one-shot commands instead of expecting persisted credentials.
+
+## PAT authentication (Personal Access Token)
+
+The `archery-cli` binary itself only supports username/password auth (session or JWT) and has **no PAT support**. When you have a PAT but no username/password credentials, use the bundled PAT bridge [scripts/archery_pat.py](scripts/archery_pat.py) (Windows wrapper: [scripts/archery_pat.ps1](scripts/archery_pat.ps1)) — it talks directly to the Archery REST API (`/api/v1/*`) with `Authorization: Token <pat>`, the same mechanism as the archery-sql skill.
+
+**PAT resolution precedence:** `--pat` flag → env `ARCHERY_CLI_PAT` → env `ARCHERY_PAT` → project `.archery.json` (`accounts`/`pat`) → `~/.archery.json` (`accounts`).
+
+**Base URL:** `--url` flag → env `ARCHERY_CLI_URL` → env `ARCHERY_URL` → default `https://archery.cn-pgcloud.com`.
+
+```bash
+# Set the PAT from the environment (same ARCHERY_PAT env var as archery-sql)
+# export ARCHERY_PAT=arp_pat_...
+
+# Verify auth
+python scripts/archery_pat.py whoami
+
+# Read operations
+python scripts/archery_pat.py instances
+python scripts/archery_pat.py instance-resource --instance "prod-mysql" --resource-type database
+python scripts/archery_pat.py query --instance "prod-mysql" --db mydb --sql "SELECT 1"
+python scripts/archery_pat.py workflow-list --status workflow_manreviewing
+python scripts/archery_pat.py workflow-detail 42
+python scripts/archery_pat.py workflow-log 42
+
+# Write operations (still respect the permission tiers below)
+python scripts/archery_pat.py sql-check --instance-id 1 --db mydb --sql "ALTER TABLE ..."
+python scripts/archery_pat.py workflow-submit --name "Add index" --instance-id 1 --db mydb --sql "ALTER TABLE ..." --engineer <user> --group-id 1 --group-name default
+python scripts/archery_pat.py workflow-cancel 42
+```
+
+**Create a PAT:** 登录 Archery → 右上角头像 → Personal Access Tokens (`/user/tokens/`) → 创建。Format `arp_pat_...`, shown only once — store it in the environment.
+
+**Scope:** the bridge covers the PAT-enabled REST subset — whoami, instances, instance-resource, query (read-only with masking), sql-check, workflow list/detail/log/rollback/cancel, audit-list, workflow-submit. Full binary features (slowquery, diagnostic, binlog, archive, dict) still require username/password auth via `archery-cli auth login`.
 
 ## Agent defaults
 
@@ -94,6 +128,7 @@ First-time setup: ask user for Archery URL + credentials, then run `archery-cli 
 
 | Task | Command |
 |------|---------|
+| Anything with only a PAT (no username/password) | `python scripts/archery_pat.py <action>` — see [PAT authentication](#pat-authentication-personal-access-token) |
 | List my workflows | `archery-cli workflow list --compact` |
 | Submit SQL for review | `archery-cli workflow submit --name "Fix idx" --instance 1 --db mydb --sql "ALTER TABLE ..." --dry-run`, then `--confirm <token>` |
 | Execute a query | `archery-cli query run --instance mydb --db test --sql "SELECT * FROM users LIMIT 10" --dangerous --dry-run`, then `--dangerous --confirm <token>` |
@@ -191,7 +226,7 @@ Check `ok` first, then act on exit code:
 | 1 | `E_UNKNOWN`/`E_INTEGRITY`/`E_IO` | Generic / release integrity / local filesystem error | Read error message; `E_INTEGRITY` is **non-retryable** (possible supply-chain issue), `E_IO` needs an environment fix |
 | 2 | `E_USAGE`/`E_VALIDATION` | Bad arguments | Don't retry, fix args |
 | 3 | `E_NOT_FOUND` | Resource not found | Don't retry, check IDs |
-| 4 | `E_AUTH`/`E_FORBIDDEN`/`E_CONFIG` | Auth failure | Don't retry, ask user for credentials or `archery-cli auth login` |
+| 4 | `E_AUTH`/`E_FORBIDDEN`/`E_CONFIG` | Auth failure | Don't retry, ask user for credentials or `archery-cli auth login`; if the user has a PAT (`ARCHERY_PAT`), switch to `scripts/archery_pat.py` |
 | 5 | `E_CONFIRMATION_REQUIRED` | Missing confirm token or dangerous gate | Run `--dry-run` first; if `requiresDangerous` is true, include `--dangerous` in both steps |
 | 6 | `E_CONFLICT` | Stale or invalid token | Re-run `--dry-run`, get fresh token, retry |
 | 7 | `E_NETWORK`/`E_RATE_LIMITED`/`E_SERVER` | Transient error | Back off and retry |
